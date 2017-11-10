@@ -200,9 +200,22 @@ defmodule Perhap.EventTestDynamo do
     {:ok, events} = results
     assert Enum.member?(events, ev1)
     Enum.map(rest, fn event -> refute Enum.member?(events, event) end)
+  end
 
+  test "gets an event from the pending store" do
+    random_context = Enum.random([:k, :l, :m, :n, :o])
+    random_event = make_random_event(
+      %Perhap.Event.Metadata{context: random_context} )
+    Perhap.Event.save_event(random_event)
+    result = Perhap.Event.retrieve_event(random_event.event_id)
 
+    :timer.sleep(@pause_interval)
+    #cleanup
+    ExAws.Dynamo.delete_item("Events", %{event_id: random_event.event_id |> Perhap.Event.uuid_v1_to_time_order}) |> ExAws.request!
+    ExAws.Dynamo.delete_item("Index", %{context: random_event.metadata.context, entity_id: random_event.metadata.entity_id}) |> ExAws.request!
+    #/cleanup
 
+    assert result == {:ok, random_event}
   end
 
   @tag :pending
