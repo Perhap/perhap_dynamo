@@ -8,6 +8,7 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
 
   @event_table Application.get_env(:perhap_dynamo, :event_table_name, "Events")
   @index_table Application.get_env(:perhap_dynamo, :event_index_table_name, "Index")
+  @batch_write_interval Application.get_env(:perhap_dynamo, :batch_write_interval, 100)
 
   #@derive [ExAws.Dynamo.Encodable]
   #defstruct [:event]
@@ -20,7 +21,7 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   end
 
   def init(args) do
-    interval = 100 #miliseconds
+    interval = @batch_write_interval
     Process.send_after(self(), {:batch_write, interval}, interval)
     {:ok, %{pending: [], posting: %{}}}
   end
@@ -35,6 +36,7 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   end
 
   def handle_call(:put_complete, {pid, _tag}, events = %{posting: posting}) do
+    :ok = write_index(Map.get(posting, pid))
     {:reply, :received, %{events | posting: Map.delete(posting, pid)}}
   end
 
@@ -208,6 +210,7 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
                                                            metadata: Map.from_struct(event.metadata)}
                                      |> Map.from_struct end)
     :ok = batch_put(events)
+    IO.puts "stored #{Enum.count(events)} events"
     GenServer.call(:eventstore, :put_complete)
   end
 
@@ -216,18 +219,10 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   end
 
   defp batch_put(events) do
-    index_keys = make_index_keys(events)
-
-    index = retrieve_index(index_keys)
-
-    index_put_request = process_index(events, index)
-
     event_put_request = events
                         |> Enum.map(fn event -> [put_request:
                                                   [item: event]] end)
-
-    do_write_events(events, event_put_request, index_put_request)
-
+    do_write_events(events, event_put_request)
   end
 
   defp process_index([], index) do
@@ -263,22 +258,35 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
               #unprocessed keys
   end
 
-  defp do_write_events(events, event_put_request, index_put_request) do
+  defp do_write_events(events, event_put_request) do
     case ExAws.Dynamo.batch_write_item(%{@event_table => event_put_request}) |> ExAws.request do
       {:error, reason} ->
         IO.puts "Error writing events to dynamo, reason: #{inspect reason}"
         IO.inspect events
       _ ->
-        case ExAws.Dynamo.batch_write_item(%{@index_table => index_put_request}) |> ExAws.request do
-          {:error, reason} ->
-            IO.puts "Error writing index to dynamo, reason: #{inspect reason}"
-            IO.inspect {:events, events}
-            IO.inspect {:index, index_put_request}
+        :ok
+    end
+  end
 
-            Enum.each(events, fn event -> ExAws.Dynamo.delete_item(@event_table, %{event_id: event.event_id |> Perhap.Event.uuid_v1_to_time_order}) |> ExAws.request! end)
-          _ ->
-            :ok
-        end
+
+  defp write_index(events) do
+    index_keys = make_index_keys(events)
+
+    index = retrieve_index(index_keys)
+
+    index_put_request = process_index(events, index)
+
+    case ExAws.Dynamo.batch_write_item(%{@index_table => index_put_request}) |> ExAws.request do
+      {:error, reason} ->
+        IO.puts "Error writing index to dynamo, reason: #{inspect reason}"
+        IO.inspect {:events, events}
+        IO.inspect {:index, index_put_request}
+
+        Enum.each(events, fn event ->
+          ExAws.Dynamo.delete_item(@event_table, %{event_id: event.event_id |> Perhap.Event.uuid_v1_to_time_order})
+          |> ExAws.request! end)
+      _ ->
+        :ok
     end
   end
 

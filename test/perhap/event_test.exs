@@ -218,6 +218,31 @@ defmodule Perhap.EventTestDynamo do
     assert result == {:ok, random_event}
   end
 
+  test "can read and write more than 100 events" do
+    context = :test_more_than_100_events
+    random_entity = Perhap.Event.get_uuid_v4
+    events = Enum.map(1..125, fn _number -> make_random_event(
+      %Perhap.Event.Metadata{context: context, entity_id: random_entity}) end)
+    Enum.each(events, fn event -> Perhap.Event.save_event(event) end)
+    :timer.sleep(@pause_interval)
+    results = Perhap.Event.retrieve_events(context)
+
+    #cleanup
+    #Enum.map(events, fn event -> ExAws.Dynamo.delete_item("Events", %{event_id: event.event_id |> Perhap.Event.uuid_v1_to_time_order}) |> ExAws.request! end)
+    #ExAws.Dynamo.delete_item("Index", %{context: context, entity_id: random_entity}) |> ExAws.request!
+    #/cleanup
+
+    sorted_events = Enum.sort(events, fn event1, event2 -> event1.event_id >= event2.event_id end)
+    with {:ok, retrieved_events} <- results do
+      sorted_results = Enum.sort(retrieved_events, fn event1, event2 -> event1.event_id >= event2.event_id end)
+
+      assert Enum.count(sorted_events) == Enum.count(sorted_results)
+    end
+
+
+  end
+
+
   @tag :pending
   test "retrieves events filtered by an event_type" do
   end
