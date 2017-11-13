@@ -27,10 +27,10 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     GenServer.call(:eventstore, {:get_event, event_id})
   end
 
-  #@spec get_events(atom(), [entity_id: Perhap.Event.UUIDv4.t, after: Perhap.Event.UUIDv1.t]) :: {:ok, list(Perhap.Event.t)} | {:error, term}
-  #def get_events(context, opts \\ []) do
-  #  GenServer.call(:eventstore, {:get_events, context, opts})
-  #end
+  @spec get_events(atom(), [entity_id: Perhap.Event.UUIDv4.t, after: Perhap.Event.UUIDv1.t]) :: {:ok, list(Perhap.Event.t)} | {:error, term}
+  def get_events(context, opts \\ []) do
+    GenServer.call(:eventstore, {:get_events, context, opts})
+  end
 
   ### Server
   def init(args) do
@@ -47,27 +47,6 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     :ok = write_index(Map.get(posting, pid))
     {:reply, :received, %{events | posting: Map.delete(posting, pid)}}
   end
-
-  def handle_info({:batch_write, interval}, events = %{pending: []}) do
-    Process.send_after(self(), {:batch_write, interval}, interval)
-    {:noreply, events}
-  end
-
-  def handle_info({:batch_write, interval}, events) do
-    chunked = events.pending
-    |> Enum.chunk_every(25)
-    |> Enum.map(fn chunk -> with {:ok, pid} <- Task.start(__MODULE__, :put_to_dynamo, [chunk])
-                            do {pid, chunk}
-                            else err -> raise err
-                            end
-                end)
-    posted = Enum.reduce(chunked, events.posting, fn {pid, chunk}, acc -> Map.put(acc, pid, chunk) end)
-
-    Process.send_after(self(), {:batch_write, interval}, interval)
-    {:noreply, %{pending: [], posting: posted}}
-  end
-
-
 
   def handle_call({:get_event, event_id}, _from, events) do
     result = case check_pending_events(event_id, events) do
@@ -93,6 +72,71 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     {:reply, result, events}
   end
 
+  def handle_call({:get_events, context, opts}, from, event_state) do
+    event_ids = case Keyword.has_key?(opts, :entity_id) do
+      true ->
+        dynamo_object = ExAws.Dynamo.get_item(@index_table, %{context: context, entity_id: opts[:entity_id]})
+        |> ExAws.request!
+
+        from_dynamo = case dynamo_object do
+          %{"Item" => data} ->
+            ExAws.Dynamo.Decoder.decode(data)
+            |> Map.get("events", [])
+          %{} ->
+            []
+        end
+        from_dynamo ++ get_by_context(event_state, context, opts[:entity_id])
+      _ ->
+        get_by_context(event_state, context, nil) ++ ExAws.Dynamo.query(@index_table,
+                            expression_attribute_values: [context: context],
+                            key_condition_expression: "context = :context")
+                        |> ExAws.request!
+                        |> Map.get("Items")
+                        |> Enum.map(fn x -> ExAws.Dynamo.Decoder.decode(x) end)
+                        |> Enum.map(fn x -> Map.get(x, "events") end)
+                        |> List.flatten
+
+    end
+
+    if event_ids == [] do
+      {:reply, {:ok, []}, event_state}
+    else
+      event_ids2 = case Keyword.has_key?(opts, :after) do
+        true ->
+          after_event = time_order(opts[:after])
+          event_ids |> Enum.filter(fn ev -> ev > after_event end)
+        _ -> event_ids
+      end
+
+      event_ids3 = for event_id <- event_ids2, do: [event_id: event_id]
+
+      events = Enum.chunk_every(event_ids3, 100) |> batch_get([])
+
+      {:reply, {:ok, events}, event_state}
+    end
+  end
+
+  def handle_info({:batch_write, interval}, events = %{pending: []}) do
+    Process.send_after(self(), {:batch_write, interval}, interval)
+    {:noreply, events}
+  end
+
+  def handle_info({:batch_write, interval}, events) do
+    chunked = events.pending
+    |> Enum.chunk_every(25)
+    |> Enum.map(fn chunk -> with {:ok, pid} <- Task.start(__MODULE__, :put_to_dynamo, [chunk])
+                            do {pid, chunk}
+                            else err -> raise err
+                            end
+                end)
+    posted = Enum.reduce(chunked, events.posting, fn {pid, chunk}, acc -> Map.put(acc, pid, chunk) end)
+
+    Process.send_after(self(), {:batch_write, interval}, interval)
+    {:noreply, %{pending: [], posting: posted}}
+  end
+
+  ### Helpers
+
   defp check_pending_events(event_id, %{pending: pending, posting: posting}) do
     case Enum.find(pending, fn (event) -> event.event_id == event_id end) do
       nil ->
@@ -111,49 +155,17 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     end
   end
 
-  @spec get_events(atom(), [entity_id: Perhap.Event.UUIDv4.t, after: Perhap.Event.UUIDv1.t]) :: {:ok, list(Perhap.Event.t)} | {:error, term}
-  def get_events(context, opts \\ []) do
-    event_ids = case Keyword.has_key?(opts, :entity_id) do
-      true ->
-        dynamo_object = ExAws.Dynamo.get_item(@index_table, %{context: context, entity_id: opts[:entity_id]})
-        |> ExAws.request!
-
-        case dynamo_object do
-          %{"Item" => data} ->
-            ExAws.Dynamo.Decoder.decode(data)
-            |> Map.get("events", [])
-          %{} ->
-            []
-        end
-      _ ->
-        dynamo_object = ExAws.Dynamo.query(@index_table,
-                                           expression_attribute_values: [context: context],
-                                           key_condition_expression: "context = :context")
-                        |> ExAws.request!
-                        |> Map.get("Items")
-                        |> Enum.map(fn x -> ExAws.Dynamo.Decoder.decode(x) end)
-                        |> Enum.map(fn x -> Map.get(x, "events") end)
-                        |> List.flatten
-
-    end
-
-    if event_ids == [] do
-      {:ok, []}
-    else
-      event_ids2 = case Keyword.has_key?(opts, :after) do
-        true ->
-          after_event = time_order(opts[:after])
-          event_ids |> Enum.filter(fn ev -> ev > after_event end)
-        _ -> event_ids
-      end
-
-      event_ids3 = for event_id <- event_ids2, do: [event_id: event_id]
-
-      events = Enum.chunk_every(event_ids3, 100) |> batch_get([])
-
-      {:ok, events}
-    end
+  defp get_by_context(%{pending: pending, posting: posting}, context, nil) do
+    (Enum.filter(pending, fn event -> event.metadata.context == context end) |> Enum.map(fn event -> event.event_id end))
+    ++ (Map.values(posting) |> List.flatten |> Enum.filter(fn event -> event.metadata.context == context end) |> Enum.map(fn event -> event.event_id end))
   end
+
+  defp get_by_context(%{pending: pending, posting: posting}, context, entity_id) do
+    (Enum.filter(pending, fn event -> event.metadata.context == context and event.metadata.entity_id == entity_id end) |> Enum.map(fn event -> event.event_id end))
+    ++ (Map.values(posting) |> List.flatten |> Enum.filter(fn event -> event.metadata.context == context and event.metadata.entity_id == entity_id end) |> Enum.map(fn event -> event.event_id end))
+  end
+
+
 
   defp batch_get([], events) do
     events
