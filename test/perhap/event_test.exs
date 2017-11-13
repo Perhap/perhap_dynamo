@@ -2,7 +2,6 @@ defmodule Perhap.EventTestDynamo do
   use ExUnit.Case, async: false
   import PerhapTest.Helper, only: :functions
 
-  @interval 1
   @pause_interval 500
 
   setup do
@@ -224,19 +223,20 @@ defmodule Perhap.EventTestDynamo do
     events = Enum.map(1..125, fn _number -> make_random_event(
       %Perhap.Event.Metadata{context: context, entity_id: random_entity}) end)
     Enum.each(events, fn event -> Perhap.Event.save_event(event) end)
-    :timer.sleep(@pause_interval)
+    :timer.sleep(4000)
+
     results = Perhap.Event.retrieve_events(context)
 
     #cleanup
-    #Enum.map(events, fn event -> ExAws.Dynamo.delete_item("Events", %{event_id: event.event_id |> Perhap.Event.uuid_v1_to_time_order}) |> ExAws.request! end)
-    #ExAws.Dynamo.delete_item("Index", %{context: context, entity_id: random_entity}) |> ExAws.request!
+    Enum.map(events, fn event -> ExAws.Dynamo.delete_item("Events", %{event_id: event.event_id |> Perhap.Event.uuid_v1_to_time_order}) |> ExAws.request! end)
+    ExAws.Dynamo.delete_item("Index", %{context: context, entity_id: random_entity}) |> ExAws.request!
     #/cleanup
 
     sorted_events = Enum.sort(events, fn event1, event2 -> event1.event_id >= event2.event_id end)
     with {:ok, retrieved_events} <- results do
       sorted_results = Enum.sort(retrieved_events, fn event1, event2 -> event1.event_id >= event2.event_id end)
 
-      assert Enum.count(sorted_events) == Enum.count(sorted_results)
+      assert sorted_events == sorted_results
     end
 
 

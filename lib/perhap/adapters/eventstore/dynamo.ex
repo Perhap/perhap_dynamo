@@ -10,25 +10,33 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   @index_table Application.get_env(:perhap_dynamo, :event_index_table_name, "Index")
   @batch_write_interval Application.get_env(:perhap_dynamo, :batch_write_interval, 100)
 
-  #@derive [ExAws.Dynamo.Encodable]
-  #defstruct [:event]
 
-  #alias __MODULE__
-
+  ### Interface
   @spec start_link(opts: any()) ::   {:ok, pid} | :ignore | {:error, {:already_started, pid} | term}
   def start_link(args) do
     GenServer.start_link(__MODULE__, [], name: :eventstore)
   end
 
+  @spec put_event(event: Perhap.Event.t) :: :ok | {:error, term}
+  def put_event(event) do
+    GenServer.call(:eventstore, {:put_event, event})
+  end
+
+  @spec get_event(event_id: Perhap.Event.UUIDv1) :: {:ok, Perhap.Event.t} | {:error, term}
+  def get_event(event_id) do
+    GenServer.call(:eventstore, {:get_event, event_id})
+  end
+
+  #@spec get_events(atom(), [entity_id: Perhap.Event.UUIDv4.t, after: Perhap.Event.UUIDv1.t]) :: {:ok, list(Perhap.Event.t)} | {:error, term}
+  #def get_events(context, opts \\ []) do
+  #  GenServer.call(:eventstore, {:get_events, context, opts})
+  #end
+
+  ### Server
   def init(args) do
     interval = @batch_write_interval
     Process.send_after(self(), {:batch_write, interval}, interval)
     {:ok, %{pending: [], posting: %{}}}
-  end
-
-  @spec put_event(event: Perhap.Event.t) :: :ok | {:error, term}
-  def put_event(event) do
-    GenServer.call(:eventstore, {:put_event, event})
   end
 
   def handle_call({:put_event, event}, _from, events) do
@@ -59,34 +67,7 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     {:noreply, %{pending: [], posting: posted}}
   end
 
-  @doc """
-  def put_event(event) do
-    event = %Perhap.Event{event | event_id: event.event_id |> Perhap.Event.uuid_v1_to_time_order}
-    ExAws.Dynamo.put_item(Application.get_env(:perhap_dynamo, :event_table_name, "Events"), %{Map.from_struct(event) | metadata: Map.from_struct(event.metadata)})
-    |> ExAws.request!
 
-    dynamo_object = ExAws.Dynamo.get_item(Application.get_env(:perhap_dynamo, :event_index_table_name, "Index"), %{context: event.metadata.context, entity_id: event.metadata.entity_id})
-    |> ExAws.request!
-
-    indexed_events = case dynamo_object do
-      %{"Item" => data} ->
-        Map.get(data, "events") |> ExAws.Dynamo.Decoder.decode
-      %{} ->
-        []
-    end
-
-    ExAws.Dynamo.put_item(Application.get_env(:perhap_dynamo, :event_index_table_name, "Index"), %{context: event.metadata.context, entity_id: event.metadata.entity_id, events: [event.event_id | indexed_events]})
-    |> ExAws.request!
-
-    :ok
-  end
-  """
-
-
-  @spec get_event(event_id: Perhap.Event.UUIDv1) :: {:ok, Perhap.Event.t} | {:error, term}
-  def get_event(event_id) do
-    GenServer.call(:eventstore, {:get_event, event_id})
-  end
 
   def handle_call({:get_event, event_id}, _from, events) do
     result = case check_pending_events(event_id, events) do
@@ -185,9 +166,10 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
              |> Map.get("Events")
              |> Enum.map(fn event -> {event, ExAws.Dynamo.decode_item(event["metadata"], as: Perhap.Event.Metadata)} end)
              |> Enum.map(fn {event, metadata} ->
-               %Perhap.Event{ExAws.Dynamo.decode_item(event, as: Perhap.Event) | event_id: metadata.event_id,
-                                                                                 metadata: %Perhap.Event.Metadata{metadata | context: String.to_atom(metadata.context),
-                                                                                                                             type: String.to_atom(metadata.type)}} end)
+               %Perhap.Event{ExAws.Dynamo.decode_item(event, as: Perhap.Event)
+               | event_id: metadata.event_id,
+                 metadata: %Perhap.Event.Metadata{metadata | context: String.to_atom(metadata.context),
+                                                             type: String.to_atom(metadata.type)}} end)
 
     batch_get(rest, event_accumulator ++ events)
   end
@@ -210,7 +192,6 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
                                                            metadata: Map.from_struct(event.metadata)}
                                      |> Map.from_struct end)
     :ok = batch_put(events)
-    IO.puts "stored #{Enum.count(events)} events"
     GenServer.call(:eventstore, :put_complete)
   end
 
@@ -270,6 +251,11 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
 
 
   defp write_index(events) do
+    events = events
+             |> Enum.map(fn event -> %Perhap.Event{event | event_id: event.event_id |> Perhap.Event.uuid_v1_to_time_order,
+                                                           metadata: Map.from_struct(event.metadata)}
+                                     |> Map.from_struct end)
+
     index_keys = make_index_keys(events)
 
     index = retrieve_index(index_keys)
