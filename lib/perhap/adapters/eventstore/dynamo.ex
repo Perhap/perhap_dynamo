@@ -14,7 +14,7 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   ### Interface
   @spec start_link(opts: any()) ::   {:ok, pid} | :ignore | {:error, {:already_started, pid} | term}
   def start_link(args) do
-    GenServer.start_link(__MODULE__, [], name: :eventstore)
+    GenServer.start_link(__MODULE__, args, name: :eventstore)
   end
 
   @spec put_event(event: Perhap.Event.t) :: :ok | {:error, term}
@@ -33,7 +33,7 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   end
 
   ### Server
-  def init(args) do
+  def init(_args) do
     interval = @batch_write_interval
     Process.send_after(self(), {:batch_write, interval}, interval)
     {:ok, %{pending: [], posting: %{}}}
@@ -52,7 +52,7 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     result = case check_pending_events(event_id, events) do
       {:ok, event} ->
         {:ok, event}
-      {:error, reason} ->
+      {:error, _reason} ->
         event_id_time_order = event_id |> Perhap.Event.uuid_v1_to_time_order
         dynamo_object = ExAws.Dynamo.get_item(@event_table, %{event_id: event_id_time_order})
         |> ExAws.request!
@@ -72,7 +72,7 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     {:reply, result, events}
   end
 
-  def handle_call({:get_events, context, opts}, from, event_state) do
+  def handle_call({:get_events, context, opts}, _from, event_state) do
     event_ids = case Keyword.has_key?(opts, :entity_id) do
       true ->
         dynamo_object = ExAws.Dynamo.get_item(@index_table, %{context: context, entity_id: opts[:entity_id]})
@@ -193,10 +193,10 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     end
   end
 
-  defp decode_data(data) do
-    Enum.reduce(data, %{}, fn({key, value}, map) ->
-      Map.put(map, String.to_atom(key), value) end)
-  end
+  #defp decode_data(data) do
+  #  Enum.reduce(data, %{}, fn({key, value}, map) ->
+  #    Map.put(map, String.to_atom(key), value) end)
+  #end
 
   def put_to_dynamo(events) do
     events = events
