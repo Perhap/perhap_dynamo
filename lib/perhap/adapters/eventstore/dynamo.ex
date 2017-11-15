@@ -58,13 +58,32 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   going to Dynamo for the event.
 
   ## Example:
-  Perhap.Adapters.Eventstore.Dynamo.get_event(event_id)
+  {:ok, %Perhap.Event{}} = Perhap.Adapters.Eventstore.Dynamo.get_event(event_id)
   """
   @spec get_event(event_id: Perhap.Event.UUIDv1) :: {:ok, Perhap.Event.t} | {:error, term}
   def get_event(event_id) do
     GenServer.call(:eventstore, {:get_event, event_id})
   end
 
+  @doc """
+  Retrieves events based on the context associated with those events.  The context
+  can be found in the event metadata (Perhap.Event.Metadata).  The results can be
+  narrowed by supplying an entity_id as an option or an after option which will only
+  retrieve events created after the supplied event_id.
+
+  Returns a list of events inside an :ok tuple response ({:ok, events}) or empty
+  {:ok, []} if no events were found.  Can return an :error tuple (:error, reason)
+  if an unknown error occurred.
+
+  ## Example:
+
+  {:ok, events} = get_events(event.metadata.context) #get all events with the same context as this event
+  {:ok []} = get_Events(:no_events_with_this_context)
+  {:ok, events} = get_events(event.metadata.context, [entity_id: event.metadata.entity_id])
+  {:ok, events} = get_events(event.metadata.context, [after: event.event_id])
+
+  """
+  
   @spec get_events(atom(), [entity_id: Perhap.Event.UUIDv4.t, after: Perhap.Event.UUIDv1.t]) :: {:ok, list(Perhap.Event.t)} | {:error, term}
   def get_events(context, opts \\ []) do
     GenServer.call(:eventstore, {:get_events, context, opts})
