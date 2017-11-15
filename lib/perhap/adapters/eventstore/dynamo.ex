@@ -1,4 +1,25 @@
 defmodule Perhap.Adapters.Eventstore.Dynamo do
+  @moduledoc """
+  Dynamo Adapter for perhap.
+
+  This is a singleton instance of the eventstore.  It receives events from calling
+  processes through the put_event/1 interface.  It stores the event locally and
+  returns control to the calling process immediately.
+
+  Approximately every 100ms (configurable) it takes all the events that have been
+  saved up by put_event and creates new processes to submit those events to Dynamo.
+
+  The Dynamo instance is configured in the application config (usually config.exs)
+  where the event table, index table, batching interval parts of this adapter and
+  the aws credentials and region can be specified for the supporting library ExAws
+
+  There are two ways of getting events, get_event/1 which takes an event_id and
+  returns only 1 event matching that id, and get_event/2 which takes a context atom
+  and two options :entity_id and :after for narrowing the results.
+
+  Both get_event and get_events check the local events before contacting Dynamo
+  for additional results.
+  """
   use Perhap.Adapters.Eventstore
   use GenServer
 
@@ -17,11 +38,28 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     GenServer.start_link(__MODULE__, args, name: :eventstore)
   end
 
+  @doc """
+  Put event saves an event within the local process and returns control to the
+  calling process. This adapter treats events collected locally as saved to Dynamo.
+
+  ## Example:
+
+  >Perhap.Adapters.Eventstore.Dynamo.put_event(%Perhap.Event{})
+  :ok
+
+  """
   @spec put_event(event: Perhap.Event.t) :: :ok | {:error, term}
   def put_event(event) do
     GenServer.call(:eventstore, {:put_event, event})
   end
 
+  @doc """
+  Retrieves an event using its event_id. Checks the locally stored events before
+  going to Dynamo for the event.
+
+  ## Example:
+  Perhap.Adapters.Eventstore.Dynamo.get_event(event_id)
+  """
   @spec get_event(event_id: Perhap.Event.UUIDv1) :: {:ok, Perhap.Event.t} | {:error, term}
   def get_event(event_id) do
     GenServer.call(:eventstore, {:get_event, event_id})
