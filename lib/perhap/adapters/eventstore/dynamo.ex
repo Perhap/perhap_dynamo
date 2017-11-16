@@ -31,7 +31,6 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   @index_table Application.get_env(:perhap_dynamo, :event_index_table_name, "Index")
   @batch_write_interval Application.get_env(:perhap_dynamo, :batch_write_interval, 100)
 
-
   ### Interface
   @spec start_link(opts: any()) ::   {:ok, pid} | :ignore | {:error, {:already_started, pid} | term}
   def start_link(args) do
@@ -83,15 +82,18 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   {:ok, events} = get_events(event.metadata.context, [after: event.event_id])
 
   """
-  
+
   @spec get_events(atom(), [entity_id: Perhap.Event.UUIDv4.t, after: Perhap.Event.UUIDv1.t]) :: {:ok, list(Perhap.Event.t)} | {:error, term}
   def get_events(context, opts \\ []) do
     GenServer.call(:eventstore, {:get_events, context, opts})
   end
 
+
+
   ### Server
   def init(_args) do
     interval = @batch_write_interval
+    Process.flag(:trap_exit, true)
     Process.send_after(self(), {:batch_write, interval}, interval)
     {:ok, %{pending: [], posting: %{}}}
   end
@@ -192,6 +194,10 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
     {:noreply, %{pending: [], posting: posted}}
   end
 
+  def terminate(_reason, events) do
+    dump_events_to_disk(events)
+  end
+
   ### Helpers
 
   defp check_pending_events(event_id, %{pending: pending, posting: posting}) do
@@ -209,6 +215,17 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
         {:error, "Event not found"}
       event ->
         {:ok, event}
+    end
+  end
+
+  defp dump_events_to_disk(events) do
+    try do
+      {:ok, file} = File.open("Perhap_dynamo_process_dump_" <> inspect(:os.system_time(:millisecond)), [:write, :utf8])
+      IO.inspect(file, events, [])
+      File.close(file)
+    rescue
+      error -> IO.puts(:stderr, "Error writing dynamo crash dump to file: #{inspect error}")
+               IO.inspect(:stderr, events)
     end
   end
 
@@ -298,14 +315,20 @@ defmodule Perhap.Adapters.Eventstore.Dynamo do
   end
 
   defp retrieve_index(index_keys) do
-    ExAws.Dynamo.batch_get_item(%{@index_table => [keys: index_keys]})
+    results = ExAws.Dynamo.batch_get_item(%{@index_table => [keys: index_keys]})
               |> ExAws.request!
               |> Map.get("Responses")
               |> Map.get("Index")
-              |> Enum.map(fn index_item -> ExAws.Dynamo.Decoder.decode(index_item) end)
-              |> Enum.map(fn index_item -> %{index_item | "context" => String.to_atom(index_item["context"])} end)
-              |> Enum.reduce(%{}, fn (index, map) -> Map.put(map, {index["context"], index["entity_id"]},  index["events"]) end)
-              #unprocessed keys
+    case results do
+      nil ->
+        %{}
+      index ->
+        index
+        |> Enum.map(fn index_item -> ExAws.Dynamo.Decoder.decode(index_item) end)
+        |> Enum.map(fn index_item -> %{index_item | "context" => String.to_atom(index_item["context"])} end)
+        |> Enum.reduce(%{}, fn (index, map) -> Map.put(map, {index["context"], index["entity_id"]},  index["events"]) end)
+    end
+
   end
 
   defp do_write_events(events, event_put_request) do
